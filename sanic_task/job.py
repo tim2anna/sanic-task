@@ -1,0 +1,360 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+
+import inspect
+from functools import partial
+from uuid import uuid4
+from enum import Enum
+from datetime import datetime
+import pickle
+import redis
+
+
+from . import TaskManager
+from .exceptions import NoSuchJobError, UnpickleError
+from .local import LocalStack
+from .utils import import_attribute, as_text
+
+# Serialize pickle dumps using the highest pickle protocol (binary, default
+# uses ascii)
+dumps = partial(pickle.dumps, protocol=pickle.HIGHEST_PROTOCOL)
+loads = pickle.loads
+
+
+def decode_redis_hash(h):
+    return dict((as_text(k), h[k]) for k in h)
+
+
+class JobStatus(Enum):
+    QUEUED = 'queued'  # 排队中
+    FINISHED = 'finished'  # 已完成
+    FAILED = 'failed'  # 失败
+    STARTED = 'started'  # 已开始
+    DEFERRED = 'deferred'  # 延缓
+    CANCELED = 'canceled'  # 已取消
+    TIMEOUT = 'timeout'  # 超时
+
+
+# Sentinel value to mark that some of our lazily evaluated properties have not
+# yet been evaluated.
+UNEVALUATED = object()
+
+
+def unpickle(pickled_string):
+    """Unpickles a string, but raises a unified UnpickleError in case anything
+    fails.
+    This is a helper method to not have to deal with the fact that `loads()`
+    potentially raises many types of exceptions (e.g. AttributeError,
+    IndexError, TypeError, KeyError, etc.)
+    """
+    try:
+        obj = loads(pickled_string)
+    except Exception as e:
+        raise UnpickleError('Could not unpickle', pickled_string, e)
+    return obj
+
+
+def cancel_job(job_id, connection=None):
+    """ 取消Job """
+    Job.fetch(job_id, connection=connection).cancel()
+
+
+def get_current_job():
+    """ 获取当前正在执行的Job """
+    return _job_stack.top
+
+
+
+class BaseJob(object):
+
+    def __init__(self, id=None):
+        self.id = id
+        self.created_at = datetime.now()  # 创建时间
+        self._data = UNEVALUATED
+        self._func_name = UNEVALUATED
+        self._instance = UNEVALUATED  # 对应的方法
+        self._args = UNEVALUATED
+        self._kwargs = UNEVALUATED
+        self.description = None  # 描述
+        self.origin = None  # 来源队列名称
+        self.enqueued_at = None  # 入队时间
+        self.started_at = None  # 开始时间
+        self.ended_at = None  # 结束时间
+        self._result = None  # 结果
+        self.exc_info = None  # 执行信息
+        self.timeout = TaskManager.settings.DEFAULT_WORKER_TTL  # 超时时间
+        self.result_ttl = TaskManager.settings.DEFAULT_RESULT_TTL  # 结果保存时间
+        self.ttl = TaskManager.settings.DEFAULT_WORKER_TTL  # Job的生命周期
+        self._status = None  # 状态
+        self._dependency_id = None  # 依赖Job id
+        self._dependency = None  # 依赖Job
+        self.history = []  # 执行历史记录
+        self.retry = TaskManager.settings.DEFAULT_RETRY  # 失败重试次数
+        self.retry_delay = TaskManager.settings.DEFAULT_RETRY_DELAY  # 重试时间间隔
+        self.retied = 0  # 已重试次数
+        self.next_run_at = None  # 下次运行时间
+
+    @property
+    def key(self):
+        """The Redis key that is used to store job hash under."""
+        return 'rq:job:' + self.id
+
+    @property
+    def status(self):
+        return self._status
+
+    @status.setter
+    def status(self, status):
+        self._status = status
+
+    @property
+    def is_finished(self):
+        """ 是否已经完成 """
+        return self.status == JobStatus.FINISHED
+
+    @property
+    def is_queued(self):
+        """ 是否正在排队 """
+        return self.status == JobStatus.QUEUED
+
+    @property
+    def is_failed(self):
+        """ 是否已经失败 """
+        return self.status == JobStatus.FAILED
+
+    @property
+    def is_started(self):
+        """ 是否已经开始 """
+        return self.status == JobStatus.STARTED
+
+    @property
+    def dependency(self):
+        """ 返回Job的依赖 """
+        if self._dependency_id is None:
+            return None
+        if self._dependency is not None:
+            return self._dependency
+        job = self.fetch(self._dependency_id)
+        self._dependency = job
+        return job
+
+    @property
+    def func(self):
+        """ 对应的函数 """
+        func_name = self.func_name
+        if func_name is None:
+            return None
+        if self.instance:
+            return getattr(self.instance, func_name)
+        return import_attribute(self.func_name)
+
+    @property
+    def func_name(self):
+        return self._func_name
+
+    @func_name.setter
+    def func_name(self, value):
+        self._func_name = value
+
+    @property
+    def instance(self):
+        return self._instance
+
+    @instance.setter
+    def instance(self, value):
+        self._instance = value
+
+    @property
+    def args(self):
+        return self._args
+
+    @args.setter
+    def args(self, value):
+        self._args = value
+
+    @property
+    def kwargs(self):
+        return self._kwargs
+
+    @kwargs.setter
+    def kwargs(self, value):
+        self._kwargs = value
+
+    @classmethod
+    def exists(cls, job_id):
+        """ Job是否存在 """
+        raise NotImplementedError()
+
+    @classmethod
+    def fetch(cls, id):
+        """ 通过id获取对应的Job """
+        raise NotImplementedError()
+
+    @classmethod
+    def create(cls, func, args=(), kwargs={}, connection=None,
+               result_ttl=None, ttl=None, status=None, description=None,
+               depends_on=None, timeout=None, id=None, origin=None):
+        """ 创建一个Job对象 """
+        if not isinstance(args, (tuple, list)):
+            raise TypeError('{0!r} is not a valid args list'.format(args))
+        if not isinstance(kwargs, dict):
+            raise TypeError('{0!r} is not a valid kwargs dict'.format(kwargs))
+
+        job = cls()
+        if id is not None:
+            job.id = id
+
+        if origin is not None:
+            job.origin = origin
+
+        # Set the core job tuple properties
+        job._instance = None
+        if inspect.ismethod(func):
+            job._instance = func.__self__
+            job._func_name = func.__name__
+        elif inspect.isfunction(func) or inspect.isbuiltin(func):
+            job._func_name = '{0}.{1}'.format(func.__module__, func.__name__)
+        elif isinstance(func, str):
+            job._func_name = as_text(func)
+        elif not inspect.isclass(func) and hasattr(func, '__call__'):  # a callable class instance
+            job._instance = func
+            job._func_name = '__call__'
+        else:
+            raise TypeError('Expected a callable or a string, but got: {0}'.format(func))
+        job._args = args
+        job._kwargs = kwargs
+
+        job.description = description or job.get_call_string()
+        job.result_ttl = result_ttl or TaskManager.settings.DEFAULT_RESULT_TTL
+        job.ttl = ttl or TaskManager.settings.DEFAULT_WORKER_TTL
+        job.timeout = timeout or TaskManager.settings.DEFAULT_WORKER_TTL
+        job._status = status
+
+        if depends_on is not None:
+            job._dependency_id = depends_on.id if isinstance(depends_on, cls) else depends_on
+        return job
+
+    def save(self):
+        """ 将Job保存起来 """
+        raise NotImplementedError()
+
+    # def update(self, kwargs):
+    #     """ 更新Job属性 """
+    #     raise NotImplementedError()
+
+    def to_dict(self):
+        obj = {
+            'id': self.id,
+            'created_at': self.created_at.strftime(TaskManager.settings.DATE_FMT),
+            'data': self.data,
+            'origin': self.origin,
+            'description': self.description,
+            'enqueued_at': self.enqueued_at.strftime(TaskManager.settings.DATE_FMT) if self.enqueued_at else None,
+            'started_at': self.started_at.strftime(TaskManager.settings.DATE_FMT) if self.started_at else None,
+            'ended_at': self.ended_at.strftime(TaskManager.settings.DATE_FMT) if self.ended_at else None,
+            'exc_info': self.exc_info,
+            'timeout': self.timeout,
+            'result_ttl': self.result_ttl,
+            'status': self._status,
+            'dependency_id': self._dependency_id,
+            'ttl': self.ttl,
+        }
+
+        if self._result is not None:
+            try:
+                obj['result'] = dumps(self._result)
+            except:
+                obj['result'] = 'Unpickleable return value'
+        return obj
+
+    def cancel(self):
+        """ 取消Job """
+        from .queue import Queue
+        q = Queue(name=self.origin)
+        q.remove(self)
+        self.status = JobStatus.CANCELED
+        self.save()
+
+    def perform(self):
+        """ 执行Job """
+        _job_stack.push(self)
+        try:
+            self._result = self._execute()
+        finally:
+            assert self is _job_stack.pop()
+        return self._result
+
+    def _execute(self):
+        """ 运行Job """
+        return self.func(*self.args, **self.kwargs)
+
+    def get_ttl(self, default_ttl=None):
+        """ Job的生命周期 """
+        return default_ttl if self.ttl is None else self.ttl
+
+    def get_result_ttl(self, default_ttl=None):
+        """ 结果保存期限 """
+        return default_ttl if self.result_ttl is None else self.result_ttl
+
+    def get_call_string(self):
+        """ 将方法名和调用参数拼接成字符串 """
+        if self.func_name is None:
+            return None
+
+        arg_list = [as_text(repr(arg)) for arg in self.args]
+        kwargs = ['{0}={1}'.format(k, as_text(repr(v))) for k, v in self.kwargs.items()]
+
+        arg_list += sorted(kwargs)
+        args = ', '.join(arg_list)
+
+        return '{0}({1})'.format(self.func_name, args)
+
+    def failure(self):
+        raise NotImplementedError()
+
+    def success(self):
+        raise NotImplementedError()
+
+
+class RedisJob(BaseJob):
+
+    redis_client = redis.Redis(connection_pool=TaskManager.settings.REDIS_POOL)
+
+    failure_jobs = 'rq:failure_jobs:'
+    enqueue_jobs = 'rq:enqueue_jobs:'
+    success_jobs = 'rq:success_jobs:'
+
+    @classmethod
+    def exists(cls, job_id):
+        """ Job是否存在 """
+        return cls.redis_client.exists(job_id)
+
+    @classmethod
+    def fetch(cls, job_id):
+        """ 通过id获取对应的Job """
+        job = cls.redis_client.get(cls.enqueue_jobs + job_id)
+        return loads(job)
+
+    def save(self):
+        """ 将Job保存起来 """
+        if self.id is None:
+            self.id = str(uuid4())
+        self.redis_client.set(self.enqueue_jobs + self.id, dumps(self), self.ttl)
+
+    def failure(self):
+        self.redis_client.delete(self.enqueue_jobs + self.id)
+        self.redis_client.set(self.failure_jobs + self.id, dumps(self), self.result_ttl)
+
+    def success(self):
+        self.redis_client.delete(self.enqueue_jobs + self.id)
+        self.redis_client.set(self.success_jobs + self.id, dumps(self), self.result_ttl)
+
+
+class MongoJob(object):
+
+    def to_dict(self):
+        pass
+
+
+# Job栈：执行Job会入栈；执行完或者失败都会出栈
+_job_stack = LocalStack()
