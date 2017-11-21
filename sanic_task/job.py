@@ -64,7 +64,6 @@ def get_current_job():
     return _job_stack.top
 
 
-
 class BaseJob(object):
 
     def __init__(self, id=None):
@@ -86,8 +85,8 @@ class BaseJob(object):
         self.result_ttl = TaskManager.settings.DEFAULT_RESULT_TTL  # 结果保存时间
         self.ttl = TaskManager.settings.DEFAULT_WORKER_TTL  # Job的生命周期
         self._status = None  # 状态
-        self._dependency_id = None  # 依赖Job id
-        self._dependency = None  # 依赖Job
+        self.next_job_id = None  # 下个被执行的Job id
+        self._next_job = None  # 下个被执行的Job
         self.history = []  # 执行历史记录
         self.retry = TaskManager.settings.DEFAULT_RETRY  # 失败重试次数
         self.retry_delay = TaskManager.settings.DEFAULT_RETRY_DELAY  # 重试时间间隔
@@ -126,17 +125,6 @@ class BaseJob(object):
     def is_started(self):
         """ 是否已经开始 """
         return self.status == JobStatus.STARTED
-
-    @property
-    def dependency(self):
-        """ 返回Job的依赖 """
-        if self._dependency_id is None:
-            return None
-        if self._dependency is not None:
-            return self._dependency
-        job = self.fetch(self._dependency_id)
-        self._dependency = job
-        return job
 
     @property
     def func(self):
@@ -191,9 +179,9 @@ class BaseJob(object):
         raise NotImplementedError()
 
     @classmethod
-    def create(cls, func, args=(), kwargs={}, connection=None,
+    def create(cls, func, args=(), kwargs={},
                result_ttl=None, ttl=None, status=None, description=None,
-               depends_on=None, timeout=None, id=None, origin=None):
+               next_job=None, timeout=None, id=None, origin=None):
         """ 创建一个Job对象 """
         if not isinstance(args, (tuple, list)):
             raise TypeError('{0!r} is not a valid args list'.format(args))
@@ -230,13 +218,24 @@ class BaseJob(object):
         job.timeout = timeout or TaskManager.settings.DEFAULT_WORKER_TTL
         job._status = status
 
-        if depends_on is not None:
-            job._dependency_id = depends_on.id if isinstance(depends_on, cls) else depends_on
+        if next_job is not None:
+            job.next_job_id = next_job.id if isinstance(next_job, cls) else next_job
         return job
 
     def save(self):
         """ 将Job保存起来 """
         raise NotImplementedError()
+
+    @property
+    def next_job(self):
+        """ 下个被执行的Job """
+        if self.next_job_id is None:
+            return None
+        if self._next_job is not None:
+            return self._next_job
+        job = self.fetch(self.next_job_id)
+        self._next_job = job
+        return job
 
     # def update(self, kwargs):
     #     """ 更新Job属性 """
@@ -256,7 +255,7 @@ class BaseJob(object):
             'timeout': self.timeout,
             'result_ttl': self.result_ttl,
             'status': self._status,
-            'dependency_id': self._dependency_id,
+            'next_job_id': self.next_job_id,
             'ttl': self.ttl,
         }
 

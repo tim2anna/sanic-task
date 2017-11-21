@@ -125,8 +125,7 @@ class Queue(object):
         self.connection.rpush(self.key, job_id)
 
     def enqueue_call(self, func, args=None, kwargs=None, timeout=None,
-                     result_ttl=None, ttl=None, description=None,
-                     depends_on=None, job_id=None):
+                     result_ttl=None, ttl=None, description=None, job_id=None):
         """Creates a job to represent the delayed function call and enqueues
         it.
         It is much like `.enqueue()`, except that it takes the function's args
@@ -137,76 +136,11 @@ class Queue(object):
         result_ttl = result_ttl
 
         job = self.job_class.create(
-            func, args=args, kwargs=kwargs, connection=self.connection,
+            func, args=args, kwargs=kwargs,
             result_ttl=result_ttl, ttl=ttl, status=JobStatus.QUEUED,
-            description=description, depends_on=depends_on,
-            timeout=timeout, id=job_id, origin=self.name)
-
-        # If job depends on an unfinished job, register itself on it's
-        # parent's dependents instead of enqueueing it.
-        # If WatchError is raised in the process, that means something else is
-        # modifying the dependency. In this case we simply retry
-        if depends_on is not None:
-            if not isinstance(depends_on, self.job_class):
-                depends_on = self.job_class(id=depends_on,
-                                            connection=self.connection)
-            with self.connection.pipeline() as pipe:
-                while True:
-                    try:
-                        pipe.watch(depends_on.key)
-
-                        # If the dependency does not exist, raise an
-                        # exception to avoid creating an orphaned job.
-                        if not self.job_class.exists(depends_on.id,
-                                                     self.connection):
-                            raise InvalidJobDependency('Job {0} does not exist'.format(depends_on.id))
-
-                        if depends_on.status != JobStatus.FINISHED:
-                            pipe.multi()
-                            job.status = JobStatus.DEFERRED
-                            job.save()
-                            job.cleanup(ttl=job.ttl, pipeline=pipe)
-                            pipe.execute()
-                            return job
-                        break
-                    except redis.WatchError:
-                        continue
-
+            description=description, timeout=timeout, id=job_id, origin=self.name)
         job = self.enqueue_job(job)
-
         return job
-
-    def enqueue(self, f, *args, **kwargs):
-        """Creates a job to represent the delayed function call and enqueues
-        it.
-        Expects the function to call, along with the arguments and keyword
-        arguments.
-        The function argument `f` may be any of the following:
-        * A reference to a function
-        * A reference to an object's instance method
-        * A string, representing the location of a function (must be
-          meaningful to the import context of the workers)
-        """
-        if not isinstance(f, str) and f.__module__ == '__main__':
-            raise ValueError('Functions from the __main__ module cannot be processed '
-                             'by workers')
-
-        # Detect explicit invocations, i.e. of the form:
-        #     q.enqueue(foo, args=(1, 2), kwargs={'a': 1}, timeout=30)
-        timeout = kwargs.pop('timeout', None)
-        description = kwargs.pop('description', None)
-        result_ttl = kwargs.pop('result_ttl', None)
-        ttl = kwargs.pop('ttl', None)
-        depends_on = kwargs.pop('depends_on', None)
-        job_id = kwargs.pop('job_id', None)
-
-        if 'args' in kwargs or 'kwargs' in kwargs:
-            assert args == (), 'Extra positional arguments cannot be used when using explicit args and kwargs'  # noqa
-            args = kwargs.pop('args', None)
-            kwargs = kwargs.pop('kwargs', None)
-
-        return self.enqueue_call(func=f, args=args, kwargs=kwargs, timeout=timeout, result_ttl=result_ttl, ttl=ttl,
-                                 description=description, depends_on=depends_on, job_id=job_id)
 
     def enqueue_job(self, job):
         """ Job入队 """

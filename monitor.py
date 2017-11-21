@@ -7,9 +7,6 @@ from views import blueprint as bp_task
 app = Sanic(__name__)
 app.blueprint(bp_task)
 
-import logging
-
-logging.WARNING
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=8000, debug=True)

@@ -378,6 +378,8 @@ class Worker(object):
             job.ended_at = datetime.now()
             job._result = rv
             self.handle_job_success(job=job, queue=queue)
+            if job.next_job:  # 运行关联Job
+                queue.enqueue_job(job.next_job)
             return True
         except JobTimeoutException:
             self.kill_fork()

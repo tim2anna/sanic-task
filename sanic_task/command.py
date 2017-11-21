@@ -3,6 +3,7 @@
 
 from sanic_script import Manager
 from .worker import Worker
+from .decorators import Task
 
 
 manager = Manager(usage="sanic-task")
@@ -16,6 +17,8 @@ def start():
 
 import requests
 
+
+@Task()
 def count_words_at_url(url):
     resp = requests.get(url)
     print(resp.text.split())
@@ -25,11 +28,7 @@ def count_words_at_url(url):
     return len(resp.text.split())
 
 
-from .queue import Queue
-
-
 @manager.command
 def add_job():
-    q = Queue()
-    result = q.enqueue(count_words_at_url, 'http://nvie.com')
-    print(result)
+    s = count_words_at_url.s('http://nvie.com') | count_words_at_url.s('http://baidu.com')
+    s.delay()
