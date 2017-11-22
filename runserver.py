@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 
 from sanic import Sanic
-from views import blueprint as bp_task
+
+from sanic_task.views import blueprint as bp_task
 
 app = Sanic(__name__)
 app.blueprint(bp_task)

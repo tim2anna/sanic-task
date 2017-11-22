@@ -221,7 +221,7 @@ class Worker(object):
         else:
             raise StopRequested()
 
-    def work(self, burst=False):
+    def run(self, burst=False):
         """ 开始运行 """
         self._install_signal_handlers()
 
