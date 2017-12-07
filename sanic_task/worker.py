@@ -36,19 +36,17 @@ class Worker(object):
     connection = redis.Redis(connection_pool=TaskManager.settings.REDIS_POOL)
 
     @classmethod
-    def all(cls, job_class=None, queue_class=None):
+    def all(cls):
         """ 所有worker """
-
         workers = []
         for key in cls.connection.smembers(cls.redis_workers_keys):
-            worker = cls.find_by_key(as_text(key), job_class=job_class, queue_class=queue_class)
+            worker = cls.find_by_key(as_text(key))
             if worker is not None:
                 workers.append(worker)
-
         return workers
 
     @classmethod
-    def find_by_key(cls, worker_key, job_class=None, queue_class=None):
+    def find_by_key(cls, worker_key):
         """ 通过Redis Key返回worker的实例 """
         prefix = cls.redis_worker_namespace_prefix
         if not worker_key.startswith(prefix):
@@ -59,7 +57,7 @@ class Worker(object):
             return None
 
         name = worker_key[len(prefix):]
-        worker = cls([], name, job_class=job_class, queue_class=queue_class)
+        worker = cls([], name)
         worker.refresh()
 
         return worker
@@ -79,7 +77,7 @@ class Worker(object):
         self.queues = [Queue(name=q) for q in queues]
         self._name = name
         self._exc_handlers = []
-        self.state = 'starting'  # 状态：开始中
+        self.state = WorkerStatus.STARTED  # 状态：开始中
         self._is_fork = False  # worker是否是fork来的
         self._fork_pid = 0
         self._stop_requested = False
@@ -119,6 +117,15 @@ class Worker(object):
         """ 当前进程ID """
         return os.getpid()
 
+    @property
+    def status(self):
+        return self.state
+
+    @status.setter
+    def status(self, status):
+        self.state = status
+        self.connection.hset(self.key, 'status', status)
+
     def register_birth(self):
         """Registers its own birth."""
         logger.debug('Registering birth of worker {0}'.format(self.name))
@@ -134,7 +141,6 @@ class Worker(object):
             p.hset(key, 'last_heartbeat', now_in_string)
             p.hset(key, 'queues', queues)
             p.sadd(self.redis_workers_keys, key)
-            p.expire(key, self.default_worker_ttl)
             p.execute()
 
     def register_death(self):
@@ -214,7 +220,7 @@ class Worker(object):
 
         logger.warning('Warm shut down requested')
 
-        if self.state == WorkerStatus.BUSY:  # 当前worker正在处理JOb
+        if self.status == WorkerStatus.BUSY:  # 当前worker正在处理JOb
             self._stop_requested = True
             self.set_shutdown_requested_date()
             logger.debug('Stopping after current horse is finished. Press Ctrl+C again for a cold shutdown.')
@@ -228,7 +234,7 @@ class Worker(object):
         did_perform_work = False
         self.register_birth()
         logger.info("RQ worker {0!r} started".format(self.key))
-        self.state = WorkerStatus.STARTED
+        self.status = WorkerStatus.STARTED
 
         qnames = self.queue_names()
         logger.info('*** Listening on {0}...'.format(', '.join(qnames)))
@@ -249,10 +255,10 @@ class Worker(object):
                         break
 
                     job, queue = result
-                    self.state = WorkerStatus.BUSY  # 设置worker状态为忙碌
+                    self.status = WorkerStatus.BUSY  # 设置worker状态为忙碌
                     self.fork_work(job, queue)
                     self.monitor_work_fork(job)
-                    self.state = WorkerStatus.IDLE  # 设置worker状态为空闲
+                    self.status = WorkerStatus.IDLE  # 设置worker状态为空闲
 
                     did_perform_work = True
                 except StopRequested:
@@ -263,35 +269,34 @@ class Worker(object):
         return did_perform_work
 
     def dequeue_job_and_maintain_ttl(self, timeout):
-        self.state = WorkerStatus.IDLE
+        self.status = WorkerStatus.IDLE
         while True:
             try:
                 self.heartbeat()
                 result = self.queue_class.dequeue_any(self.queues, timeout)
                 if result is not None:
                     job, queue = result
-                    logger.info('Receive a job: {0} ({1})'.format(queue.name, job.description, job.id))
+                    logger.info('Receive a job: {0} ({1})'.format(queue.name, job.desc, job.id))
                 break
             except DequeueTimeout:
                 pass
         return result
 
-    def heartbeat(self, timeout=0):
+    def heartbeat(self):
         """ 心跳，指定一个新的worker超时时间 """
-        timeout = max(timeout, self.default_worker_ttl)
-        self.connection.expire(self.key, timeout)
         self.connection.hset(self.key, 'last_heartbeat', datetime.now().strftime(TaskManager.settings.DATE_FMT))
+        self.refresh()
         logger.debug('Sent heartbeat to prevent worker timeout. '
-                     'Next one should arrive within {0} seconds.'.format(timeout))
+                     'Next one should arrive within {0} seconds.'.format(self.default_worker_ttl))
 
     def refresh(self):
         data = self.connection.hmget(
-            self.key, 'queues', 'state', 'current_job', 'last_heartbeat',
+            self.key, 'queues', 'status', 'current_job', 'last_heartbeat',
             'birth', 'failed_job_count', 'successful_job_count', 'total_working_time'
         )
-        queues, state, job_id, last_heartbeat, birth, failed_job_count, successful_job_count, total_working_time = data
+        queues, status, job_id, last_heartbeat, birth, failed_job_count, successful_job_count, total_working_time = data
         queues = as_text(queues)
-        self.state = as_text(state or '?')
+        self.state = as_text(status or '?')
         self._job_id = job_id or None
         self.last_heartbeat = datetime.strptime(as_text(last_heartbeat), TaskManager.settings.DATE_FMT)
         if failed_job_count:
@@ -302,10 +307,7 @@ class Worker(object):
             self.total_working_time = float(as_text(total_working_time))
 
         if queues:
-            self.queues = [self.queue_class(queue,
-                                            connection=self.connection,
-                                            job_class=self.job_class)
-                           for queue in queues.split(',')]
+            self.queues = [self.queue_class(queue) for queue in queues.split(',')]
 
     def fork_work(self, job, queue):
         """ fork出一个子进程执行Job """
@@ -333,9 +335,10 @@ class Worker(object):
         if ret_val == os.EX_OK:  # 正常处理退出
             return
 
-        if job.status not in [JobStatus.FINISHED, JobStatus.FAILED, JobStatus.TIMEOUT]:
-            if not job.ended_at:
-                job.ended_at = datetime.now()
+        job = self.job_class.fetch(job.id)
+        if job and (job.status != str(JobStatus.FINISHED)) and (job.status != str(JobStatus.FAILED)) and (job.status != str(JobStatus.TIMEOUT)):
+            if not job.end_time:
+                job.end_time = datetime.now()
             job.status = JobStatus.FAILED
             job.save()
             job.failure()
@@ -355,7 +358,7 @@ class Worker(object):
         signal.signal(signal.SIGTERM, signal.SIG_DFL)
 
     def prepare_job_execution(self, job):
-        self.state = WorkerStatus.BUSY
+        self.status = WorkerStatus.BUSY
         self.set_current_job_id(job.id)
         job.status = JobStatus.STARTED
         job.save()
@@ -372,10 +375,10 @@ class Worker(object):
         """ 执行Job """
         self.prepare_job_execution(job)
         try:
-            job.started_at = datetime.now()
+            job.start_time = datetime.now()
             with UnixSignalJobTimout(job.timeout):
                 rv = job.perform()
-            job.ended_at = datetime.now()
+            job.end_time = datetime.now()
             job._result = rv
             self.handle_job_success(job=job, queue=queue)
             if job.next_job:  # 运行关联Job
@@ -383,10 +386,17 @@ class Worker(object):
             return True
         except JobTimeoutException:
             self.kill_fork()
-            job.ended_at = datetime.now()
+            job.end_time = datetime.now()
             job.status = JobStatus.TIMEOUT
             job.save()
             job.failure()
+
+            if job.next_job:
+                next_job = job.next_job
+                next_job.status = JobStatus.FAILED
+                next_job.exc_info = 'Dependent Job Failed.'
+                next_job.save()
+
             return False
         except Exception:
             exc_info = sys.exc_info()
@@ -400,11 +410,17 @@ class Worker(object):
                 'queue': job.origin,
             })
 
-            job.ended_at = datetime.now()
+            job.end_time = datetime.now()
             job.status = JobStatus.FAILED
             job.exc_info = exc_string
             job.save()
             job.failure()
+
+            if job.next_job:
+                next_job = job.next_job
+                next_job.status = JobStatus.FAILED
+                next_job.exc_info = 'Dependent Job Failed.'
+                next_job.save()
 
             self.handle_exception(job, *sys.exc_info())
             return False

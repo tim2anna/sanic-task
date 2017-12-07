@@ -24,7 +24,10 @@ class Queue(object):
 
     @classmethod
     def from_queue_key(cls, queue_key):
-        name = queue_key.split(':')[-1]
+        if isinstance(queue_key, str):
+            name = queue_key.split(':')[-1]
+        else:
+            name = str(queue_key, encoding='utf-8').split(':')[-1]
         return cls(name)
 
     def __init__(self, name='default', default_timeout=None, async=True):
@@ -125,7 +128,7 @@ class Queue(object):
         self.connection.rpush(self.key, job_id)
 
     def enqueue_call(self, func, args=None, kwargs=None, timeout=None,
-                     result_ttl=None, ttl=None, description=None, job_id=None):
+                     result_ttl=None, ttl=None, desc=None, job_id=None):
         """Creates a job to represent the delayed function call and enqueues
         it.
         It is much like `.enqueue()`, except that it takes the function's args
@@ -138,7 +141,7 @@ class Queue(object):
         job = self.job_class.create(
             func, args=args, kwargs=kwargs,
             result_ttl=result_ttl, ttl=ttl, status=JobStatus.QUEUED,
-            description=description, timeout=timeout, id=job_id, origin=self.name)
+            desc=desc, timeout=timeout, id=job_id, origin=self.name)
         job = self.enqueue_job(job)
         return job
 
@@ -146,7 +149,7 @@ class Queue(object):
         """ Job入队 """
         job.status = JobStatus.QUEUED
         job.origin = self.name
-        job.enqueued_at = datetime.now()
+        job.enqueue_time = datetime.now()
         job.save()
         self.connection.rpush(self.key, job.id)
         return job

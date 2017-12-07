@@ -11,12 +11,12 @@ setup(
     description=(
         'sanic-task is an extension for Sanic that adds support for asynchronous task to your application.'
     ),
-    author='Tim.Wang',
+    author='Tim&Anna',
     author_email='191996155@qq.com',
     license='BSD License',
     packages=find_packages(),
     platforms=["all"],
-    url='https://github.com/wanghao524151/sanic-task',
+    url='https://github.com/tim2anna/sanic-task',
     install_requires=[
         'sanic>=0.6.0',
         'sanic-script>=0.2',

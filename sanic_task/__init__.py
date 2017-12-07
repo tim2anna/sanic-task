@@ -46,7 +46,7 @@ class Settings(object):
         self.DEFAULT_WORKER_CLASS = getattr(config, 'DEFAULT_WORKER_CLASS', 'rq.Worker')
         self.DEFAULT_CONNECTION_CLASS = getattr(config, 'DEFAULT_CONNECTION_CLASS', 'redis.StrictRedis')
         self.DEFAULT_WORKER_TTL = getattr(config, 'DEFAULT_WORKER_TTL', 10)
-        self.DEFAULT_RESULT_TTL = getattr(config, 'DEFAULT_RESULT_TTL', 500)
+        self.DEFAULT_RESULT_TTL = getattr(config, 'DEFAULT_RESULT_TTL', 24*3600)
         self.DEFAULT_RETRY = getattr(config, 'DEFAULT_RETRY', 3)  # 失败重试次数
         self.DEFAULT_RETRY_DELAY = getattr(config, 'DEFAULT_JOB_RETRY', 300)  # 失败重试时间间隔
 

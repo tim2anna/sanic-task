@@ -1,6 +1,7 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
 
+import json
 import inspect
 from functools import partial
 from uuid import uuid4
@@ -68,17 +69,16 @@ class BaseJob(object):
 
     def __init__(self, id=None):
         self.id = id
-        self.created_at = datetime.now()  # 创建时间
-        self._data = UNEVALUATED
+        self.create_time = datetime.now()  # 创建时间
         self._func_name = UNEVALUATED
         self._instance = UNEVALUATED  # 对应的方法
         self._args = UNEVALUATED
         self._kwargs = UNEVALUATED
-        self.description = None  # 描述
+        self.desc = None  # 描述
         self.origin = None  # 来源队列名称
-        self.enqueued_at = None  # 入队时间
-        self.started_at = None  # 开始时间
-        self.ended_at = None  # 结束时间
+        self.enqueue_time = None  # 入队时间
+        self.start_time = None  # 开始时间
+        self.end_time = None  # 结束时间
         self._result = None  # 结果
         self.exc_info = None  # 执行信息
         self.timeout = TaskManager.settings.DEFAULT_WORKER_TTL  # 超时时间
@@ -180,7 +180,7 @@ class BaseJob(object):
 
     @classmethod
     def create(cls, func, args=(), kwargs={},
-               result_ttl=None, ttl=None, status=None, description=None,
+               result_ttl=None, ttl=None, status=None, desc=None,
                next_job=None, timeout=None, id=None, origin=None):
         """ 创建一个Job对象 """
         if not isinstance(args, (tuple, list)):
@@ -212,7 +212,7 @@ class BaseJob(object):
         job._args = args
         job._kwargs = kwargs
 
-        job.description = description or job.get_call_string()
+        job.desc = desc or job.get_call_string()
         job.result_ttl = result_ttl or TaskManager.settings.DEFAULT_RESULT_TTL
         job.ttl = ttl or TaskManager.settings.DEFAULT_WORKER_TTL
         job.timeout = timeout or TaskManager.settings.DEFAULT_WORKER_TTL
@@ -244,27 +244,32 @@ class BaseJob(object):
     def to_dict(self):
         obj = {
             'id': self.id,
-            'created_at': self.created_at.strftime(TaskManager.settings.DATE_FMT),
-            'data': self.data,
+            'create_time': self.create_time.strftime(TaskManager.settings.DATE_FMT) if isinstance(self.create_time, datetime) else self.create_time,
             'origin': self.origin,
-            'description': self.description,
-            'enqueued_at': self.enqueued_at.strftime(TaskManager.settings.DATE_FMT) if self.enqueued_at else None,
-            'started_at': self.started_at.strftime(TaskManager.settings.DATE_FMT) if self.started_at else None,
-            'ended_at': self.ended_at.strftime(TaskManager.settings.DATE_FMT) if self.ended_at else None,
+            'desc': self.desc,
+            'enqueue_time': self.enqueue_time.strftime(TaskManager.settings.DATE_FMT) if isinstance(self.enqueue_time, datetime) else None,
+            'start_time': self.start_time.strftime(TaskManager.settings.DATE_FMT) if isinstance(self.start_time, datetime) else None,
+            'end_time': self.end_time.strftime(TaskManager.settings.DATE_FMT) if isinstance(self.end_time, datetime) else None,
             'exc_info': self.exc_info,
             'timeout': self.timeout,
             'result_ttl': self.result_ttl,
-            'status': self._status,
+            'status': str(self._status),
             'next_job_id': self.next_job_id,
             'ttl': self.ttl,
+            'func_name': self.func_name,
+            'instance': self.instance,
+            'args': self.args,
+            'kwargs': self.kwargs,
+            'result': self._result,
         }
-
-        if self._result is not None:
-            try:
-                obj['result'] = dumps(self._result)
-            except:
-                obj['result'] = 'Unpickleable return value'
         return obj
+
+    @classmethod
+    def to_obj(cls, _dict):
+        job = cls()
+        for attr, value in _dict.items():
+            setattr(job, attr, value)
+        return job
 
     def cancel(self):
         """ 取消Job """
@@ -314,11 +319,16 @@ class BaseJob(object):
     def success(self):
         raise NotImplementedError()
 
+    @classmethod
+    def count(cls, status):
+        raise NotImplementedError()
+
 
 class RedisJob(BaseJob):
 
     redis_client = redis.Redis(connection_pool=TaskManager.settings.REDIS_POOL)
 
+    save_jobs = 'rq:jobs:'
     failure_jobs = 'rq:failure_jobs:'
     enqueue_jobs = 'rq:enqueue_jobs:'
     success_jobs = 'rq:success_jobs:'
@@ -331,22 +341,49 @@ class RedisJob(BaseJob):
     @classmethod
     def fetch(cls, job_id):
         """ 通过id获取对应的Job """
-        job = cls.redis_client.get(cls.enqueue_jobs + job_id)
-        return loads(job)
+        job = cls.redis_client.get(cls.save_jobs + job_id)
+        if job:
+            return cls.to_obj(json.loads(job))
+        else:
+            return None
 
     def save(self):
         """ 将Job保存起来 """
         if self.id is None:
             self.id = str(uuid4())
-        self.redis_client.set(self.enqueue_jobs + self.id, dumps(self), self.ttl)
+        self.redis_client.set(self.save_jobs + self.id, json.dumps(self.to_dict()), self.result_ttl)
 
     def failure(self):
         self.redis_client.delete(self.enqueue_jobs + self.id)
-        self.redis_client.set(self.failure_jobs + self.id, dumps(self), self.result_ttl)
+        self.redis_client.set(self.failure_jobs + self.id, json.dumps(self.to_dict()), self.result_ttl)
 
     def success(self):
         self.redis_client.delete(self.enqueue_jobs + self.id)
-        self.redis_client.set(self.success_jobs + self.id, dumps(self), self.result_ttl)
+        self.redis_client.set(self.success_jobs + self.id, json.dumps(self.to_dict()), self.result_ttl)
+
+    @classmethod
+    def all_jobs(cls, status=None):
+        jobs = []
+        if status == JobStatus.FAILED:
+            keys = cls.redis_client.keys('rq:failure_jobs:*')
+            for key in keys:
+                value = cls.redis_client.get(key)
+                if value:
+                    jobs.append(cls.to_obj(json.loads(value)))
+        return jobs
+
+    @classmethod
+    def count(cls, status=None):
+        if status == JobStatus.STARTED:
+            return len(_job_stack)
+        elif status == JobStatus.QUEUED:
+            return len(cls.redis_client.keys(cls.enqueue_jobs + '*'))
+        elif status == JobStatus.FINISHED:
+            return len(cls.redis_client.keys(cls.success_jobs + '*'))
+        elif status == JobStatus.FAILED:
+            return len(cls.redis_client.keys(cls.failure_jobs + '*'))
+        else:
+            return 0
 
 
 class MongoJob(object):

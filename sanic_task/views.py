@@ -6,13 +6,15 @@ import hashlib
 from functools import wraps
 from aiofiles import open as open_async
 from sanic import Blueprint, response
+from sanic_task import TaskManager
+from sanic_task.worker import Worker
+from sanic_task.queue import Queue
+from sanic_task.utils import import_attribute
+from sanic_task.job import JobStatus
 from __init__ import SANIC_TASK_USERNAME, SANIC_TASK_PASSWORD
 
 # 声明蓝图
-blueprint = Blueprint('sanic_task', url_prefix='sanic_task')
-
-# 配置静态文件目录
-blueprint.static('/static/', './static')
+blueprint = Blueprint('sanic_task')
 
 
 LOGIN_HASH = hashlib.md5((SANIC_TASK_USERNAME + SANIC_TASK_PASSWORD).encode('utf-8')).hexdigest()
@@ -54,8 +56,85 @@ async def login(request):
     return await render_template('login.html')
 
 
-@blueprint.route('/')
-@login_required
-async def index(request):
-    """ 首页 """
-    return await render_template('index.html')
+@blueprint.route('/dashboard/worker_cards/', methods=['GET'])
+async def worker_cards(request):
+    results = []
+    for worker in Worker.all():
+        results.append({'id': worker.key, 'name': worker.name, 'status': worker.status})
+    return response.json(results)
+
+
+@blueprint.route('/dashboard/beat/', methods=['GET'])
+async def beat(request):
+    pass
+
+
+@blueprint.route('/dashboard/worker_table/', methods=['GET'])
+async def worker_table(request):
+    results = []
+    for worker in Worker.all():
+        results.append({
+            'id': worker.key,
+            'name': worker.name,
+            'status': worker.status,
+            'pid': worker.pid,
+        })
+    return response.json(results)
+
+
+@blueprint.route('/dashboard/recent_exception_jobs/', methods=['GET'])
+async def recent_exception_jobs(request):
+    job_class = import_attribute(TaskManager.settings.JOB_CLASS)
+    results = []
+    for job in job_class.all_jobs(JobStatus.FAILED):
+        results.append({'id': job.id, 'desc': job.desc, 'start_time': job.start_time, 'exc_info': job.exc_info})
+    return response.json(results)
+
+
+@blueprint.route('/dashboard/job_numbers/', methods=['GET'])
+async def job_numbers(request):
+    job_class = import_attribute(TaskManager.settings.JOB_CLASS)
+    results = {
+        'running': job_class.count(JobStatus.STARTED),
+        'enqueue': job_class.count(JobStatus.QUEUED),
+        'failure': job_class.count(JobStatus.FAILED),
+        'success': job_class.count(JobStatus.FINISHED),
+    }
+    return response.json(results)
+
+
+@blueprint.route('/workers/', methods=['GET'])
+async def workers(request):
+    results = []
+    for worker in Worker.all():
+        results.append({
+            'id': worker.key,
+            'name': worker.name,
+            'status': worker.status,
+            'pid': worker.pid,
+        })
+    return response.json({'total': len(results), 'results': results})
+
+
+@blueprint.route('/queues/', methods=['GET'])
+async def queues(request):
+    results = []
+    for queue in Queue.all():
+        results.append({
+            'id': queue.key,
+            'name': queue.name,
+            'count': queue.count,
+        })
+    return response.json({'total': len(results), 'results': results})
+
+
+@blueprint.route('/jobs/', methods=['GET'])
+async def jobs(request):
+    results = []
+    for worker in Worker.all():
+        results.append({
+            'id': worker.key,
+            'name': worker.name,
+            'status': worker.status,
+        })
+    return response.json({'total': len(results), 'results': results})

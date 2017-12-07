@@ -17,6 +17,7 @@ from sanic_task.decorators import Task
 def count_words_at_url(url):
     resp = requests.get(url)
     print(resp.text.split())
+    raise ValueError(123)
     return len(resp.text.split())
 
 
