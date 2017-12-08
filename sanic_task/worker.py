@@ -21,15 +21,14 @@ from .logutils import logger
 
 
 class WorkerStatus(Enum):
-    # worker是一个进程，要么没有运行，要么运行中，所有没有stopped状态。
     STARTED = 'started'
     BUSY = 'busy'
     IDLE = 'idle'  # 空闲
+    DEATH = 'death'
 
 
 class Worker(object):
     redis_worker_namespace_prefix = 'rq:worker:'
-    redis_workers_keys = 'rq:workers'
     queue_class = Queue
 
     # TODO：连接可能需要放在实例变量中去
@@ -39,7 +38,7 @@ class Worker(object):
     def all(cls):
         """ 所有worker """
         workers = []
-        for key in cls.connection.smembers(cls.redis_workers_keys):
+        for key in cls.connection.keys(cls.redis_worker_namespace_prefix + '*'):
             worker = cls.find_by_key(as_text(key))
             if worker is not None:
                 workers.append(worker)
@@ -48,15 +47,10 @@ class Worker(object):
     @classmethod
     def find_by_key(cls, worker_key):
         """ 通过Redis Key返回worker的实例 """
-        prefix = cls.redis_worker_namespace_prefix
-        if not worker_key.startswith(prefix):
-            raise ValueError('Not a valid RQ worker key: {0}'.format(worker_key))
-
         if not cls.connection.exists(worker_key):
-            cls.connection.srem(cls.redis_workers_keys, worker_key)
             return None
 
-        name = worker_key[len(prefix):]
+        name = worker_key[len(cls.redis_worker_namespace_prefix):]
         worker = cls([], name)
         worker.refresh()
 
@@ -83,6 +77,7 @@ class Worker(object):
         self._stop_requested = False
         self.successful_job_count = 0
         self.failed_job_count = 0
+        self.death = None
 
     def validate_queues(self):
         """Sanity check for the given queues."""
@@ -138,18 +133,15 @@ class Worker(object):
             now_in_string = datetime.now().strftime(TaskManager.settings.DATE_FMT)
             p.hset(key, 'last_heartbeat', now_in_string)
             p.hset(key, 'queues', queues)
-            p.sadd(self.redis_workers_keys, key)
             p.execute()
 
     def register_death(self):
         """Registers its own death."""
         logger.debug('Registering death')
         with self.connection.pipeline() as p:
-            # We cannot use self.state = 'dead' here, because that would
-            # rollback the pipeline
-            p.srem(self.redis_workers_keys, self.key)
             p.hset(self.key, 'death', datetime.now().strftime(TaskManager.settings.DATE_FMT))
-            p.expire(self.key, 60)
+            p.hset(self.key, 'status', WorkerStatus.DEATH)
+            p.expire(self.key, 3600)  # 死亡worker的信息保存1小时
             p.execute()
 
     def set_shutdown_requested_date(self):
