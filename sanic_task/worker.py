@@ -75,8 +75,8 @@ class Worker(object):
         self._is_fork = False  # worker是否是fork来的
         self._fork_pid = 0
         self._stop_requested = False
-        self.successful_job_count = 0
-        self.failed_job_count = 0
+        self.success_job_count = 0
+        self.failure_job_count = 0
         self.death = None
 
     def validate_queues(self):
@@ -133,6 +133,8 @@ class Worker(object):
             now_in_string = datetime.now().strftime(TaskManager.settings.DATE_FMT)
             p.hset(key, 'last_heartbeat', now_in_string)
             p.hset(key, 'queues', queues)
+            p.hset(key, 'success_job_count', self.success_job_count)
+            p.hset(key, 'failure_job_count', self.failure_job_count)
             p.execute()
 
     def register_death(self):
@@ -282,17 +284,17 @@ class Worker(object):
     def refresh(self):
         data = self.connection.hmget(
             self.key, 'queues', 'status', 'current_job', 'last_heartbeat',
-            'birth', 'failed_job_count', 'successful_job_count',
+            'birth', 'failure_job_count', 'success_job_count',
         )
-        queues, status, job_id, last_heartbeat, birth, failed_job_count, successful_job_count = data
+        queues, status, job_id, last_heartbeat, birth, failure_job_count, success_job_count = data
         queues = as_text(queues)
         self.state = as_text(status or '?')
         self._job_id = job_id or None
         self.last_heartbeat = datetime.strptime(as_text(last_heartbeat), TaskManager.settings.DATE_FMT)
-        if failed_job_count:
-            self.failed_job_count = int(as_text(failed_job_count))
-        if successful_job_count:
-            self.successful_job_count = int(as_text(successful_job_count))
+        if failure_job_count:
+            self.failure_job_count = int(as_text(failure_job_count))
+        if success_job_count:
+            self.success_job_count = int(as_text(success_job_count))
         if queues:
             self.queues = [self.queue_class(queue) for queue in queues.split(',')]
 
@@ -370,6 +372,8 @@ class Worker(object):
             self.handle_job_success(job=job, queue=queue)
             if job.next_job:  # 运行关联Job
                 queue.enqueue_job(job.next_job)
+            self.success_job_count += 1
+            self.connection.hset(self.key, 'success_job_count', self.success_job_count)
             return True
         except JobTimeoutException:
             self.kill_fork()
@@ -384,6 +388,8 @@ class Worker(object):
                 next_job.exc_info = 'Dependent Job Failed.'
                 next_job.save()
 
+            self.failure_job_count += 1
+            self.connection.hset(self.key, 'failure_job_count', self.failure_job_count)
             return False
         except Exception:
             exc_info = sys.exc_info()
@@ -410,6 +416,9 @@ class Worker(object):
                 next_job.save()
 
             self.handle_exception(job, *sys.exc_info())
+
+            self.failure_job_count += 1
+            self.connection.hset(self.key, 'failure_job_count', self.failure_job_count)
             return False
 
     def handle_exception(self, job, *exc_info):

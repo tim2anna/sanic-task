@@ -78,6 +78,9 @@ async def worker_table(request):
             'name': worker.name,
             'status': worker.status,
             'pid': worker.pid,
+            'death': worker.death,
+            'success_job_count': worker.success_job_count,
+            'failure_job_count': worker.failure_job_count,
         })
     return response.json(results)
 
@@ -112,6 +115,9 @@ async def workers(request):
             'name': worker.name,
             'status': worker.status,
             'pid': worker.pid,
+            'death': worker.death,
+            'success_job_count': worker.success_job_count,
+            'failure_job_count': worker.failure_job_count,
         })
     return response.json({'total': len(results), 'results': results})
 
