@@ -81,10 +81,8 @@ class Worker(object):
         self._is_fork = False  # worker是否是fork来的
         self._fork_pid = 0
         self._stop_requested = False
-        self.last_cleaned_at = None
         self.successful_job_count = 0
         self.failed_job_count = 0
-        self.total_working_time = 0
 
     def validate_queues(self):
         """Sanity check for the given queues."""
@@ -292,9 +290,9 @@ class Worker(object):
     def refresh(self):
         data = self.connection.hmget(
             self.key, 'queues', 'status', 'current_job', 'last_heartbeat',
-            'birth', 'failed_job_count', 'successful_job_count', 'total_working_time'
+            'birth', 'failed_job_count', 'successful_job_count',
         )
-        queues, status, job_id, last_heartbeat, birth, failed_job_count, successful_job_count, total_working_time = data
+        queues, status, job_id, last_heartbeat, birth, failed_job_count, successful_job_count = data
         queues = as_text(queues)
         self.state = as_text(status or '?')
         self._job_id = job_id or None
@@ -303,9 +301,6 @@ class Worker(object):
             self.failed_job_count = int(as_text(failed_job_count))
         if successful_job_count:
             self.successful_job_count = int(as_text(successful_job_count))
-        if total_working_time:
-            self.total_working_time = float(as_text(total_working_time))
-
         if queues:
             self.queues = [self.queue_class(queue) for queue in queues.split(',')]
 
