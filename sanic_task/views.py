@@ -136,11 +136,13 @@ async def queues(request):
 
 @blueprint.route('/jobs/', methods=['GET'])
 async def jobs(request):
+    job_class = import_attribute(TaskManager.settings.JOB_CLASS)
     results = []
-    for worker in Worker.all():
+    for job in job_class.all_jobs():
         results.append({
-            'id': worker.key,
-            'name': worker.name,
-            'status': worker.status,
+            'id': job.key,
+            'desc': job.desc,
+            'status': job.status,
+
         })
     return response.json({'total': len(results), 'results': results})

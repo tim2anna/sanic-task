@@ -3,30 +3,19 @@
 
 import json
 import inspect
-from functools import partial
 from uuid import uuid4
 from enum import Enum
 from datetime import datetime
-import pickle
 import redis
 
 
 from . import TaskManager
-from .exceptions import NoSuchJobError, UnpickleError
 from .local import LocalStack
 from .utils import import_attribute, as_text
 
-# Serialize pickle dumps using the highest pickle protocol (binary, default
-# uses ascii)
-dumps = partial(pickle.dumps, protocol=pickle.HIGHEST_PROTOCOL)
-loads = pickle.loads
-
-
-def decode_redis_hash(h):
-    return dict((as_text(k), h[k]) for k in h)
-
 
 class JobStatus(Enum):
+    INITED = 'inited'  # 已初始化
     QUEUED = 'queued'  # 排队中
     FINISHED = 'finished'  # 已完成
     FAILED = 'failed'  # 失败
@@ -39,25 +28,6 @@ class JobStatus(Enum):
 # Sentinel value to mark that some of our lazily evaluated properties have not
 # yet been evaluated.
 UNEVALUATED = object()
-
-
-def unpickle(pickled_string):
-    """Unpickles a string, but raises a unified UnpickleError in case anything
-    fails.
-    This is a helper method to not have to deal with the fact that `loads()`
-    potentially raises many types of exceptions (e.g. AttributeError,
-    IndexError, TypeError, KeyError, etc.)
-    """
-    try:
-        obj = loads(pickled_string)
-    except Exception as e:
-        raise UnpickleError('Could not unpickle', pickled_string, e)
-    return obj
-
-
-def cancel_job(job_id, connection=None):
-    """ 取消Job """
-    Job.fetch(job_id, connection=connection).cancel()
 
 
 def get_current_job():
@@ -84,7 +54,7 @@ class BaseJob(object):
         self.timeout = TaskManager.settings.DEFAULT_WORKER_TTL  # 超时时间
         self.result_ttl = TaskManager.settings.DEFAULT_RESULT_TTL  # 结果保存时间
         self.ttl = TaskManager.settings.DEFAULT_WORKER_TTL  # Job的生命周期
-        self._status = None  # 状态
+        self._status = JobStatus.INITED  # 状态
         self.next_job_id = None  # 下个被执行的Job id
         self._next_job = None  # 下个被执行的Job
         self.history = []  # 执行历史记录
@@ -362,15 +332,25 @@ class RedisJob(BaseJob):
         self.redis_client.set(self.success_jobs + self.id, json.dumps(self.to_dict()), self.result_ttl)
 
     @classmethod
-    def all_jobs(cls, status=None):
+    def all_jobs(cls, status=None, page=1, size=30):
         jobs = []
         if status == JobStatus.FAILED:
-            keys = cls.redis_client.keys('rq:failure_jobs:*')
-            for key in keys:
-                value = cls.redis_client.get(key)
-                if value:
-                    jobs.append(cls.to_obj(json.loads(value)))
-        return jobs
+            keys = cls.redis_client.keys(cls.failure_jobs + '*')
+        elif status == JobStatus.FINISHED:
+            keys = cls.redis_client.keys(cls.success_jobs + '*')
+        elif status == JobStatus.QUEUED:
+            keys = cls.redis_client.keys(cls.enqueue_jobs + '*')
+        else:
+            keys = cls.redis_client.keys(cls.save_jobs + '*')
+
+        for key in keys:
+            value = cls.redis_client.get(key)
+            if value:
+                jobs.append(cls.to_obj(json.loads(value)))
+
+        start = (page-1)*size
+        end = page*size
+        return jobs[start:end]
 
     @classmethod
     def count(cls, status=None):

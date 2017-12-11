@@ -6,7 +6,7 @@ import redis
 
 from functools import total_ordering
 from . import TaskManager
-from .exceptions import (DequeueTimeout, InvalidJobDependency, NoSuchJobError)
+from .exceptions import DequeueTimeout, NoSuchJobError
 from .job import JobStatus
 from .utils import import_attribute, as_text
 
@@ -14,13 +14,15 @@ from .utils import import_attribute, as_text
 @total_ordering
 class Queue(object):
     redis_queue_namespace_prefix = 'rq:queue:'
-    redis_queues_keys = 'rq:queues'  # Redis集合保存所有的队列key
     connection = redis.Redis(connection_pool=TaskManager.settings.REDIS_POOL)
 
     @classmethod
     def all(cls):
         """ 所有队列 """
-        return [cls.from_queue_key(rq_key) for rq_key in cls.connection.smembers(cls.redis_queues_keys)]
+        queues = []
+        for key in cls.connection.keys(cls.redis_queue_namespace_prefix + '*'):
+            queues.append(cls.from_queue_key(key))
+        return queues
 
     @classmethod
     def from_queue_key(cls, queue_key):
@@ -31,9 +33,8 @@ class Queue(object):
         return cls(name)
 
     def __init__(self, name='default', default_timeout=None, async=True):
-        prefix = self.redis_queue_namespace_prefix
         self.name = name
-        self._key = '{0}{1}'.format(prefix, name)
+        self._key = '{0}{1}'.format(self.redis_queue_namespace_prefix, name)
         self._default_timeout = default_timeout
         self._async = async
         self.job_class = import_attribute(TaskManager.settings.JOB_CLASS)
@@ -79,7 +80,6 @@ class Queue(object):
             self.empty()
 
         with self.connection.pipeline() as pipeline:
-            pipeline.srem(self.redis_queues_keys, self._key)
             pipeline.delete(self._key)
             pipeline.execute()
 
