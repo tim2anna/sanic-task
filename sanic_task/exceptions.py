@@ -36,3 +36,7 @@ class TimeoutFormatError(Exception):
 
 class StopRequested(Exception):
     pass
+
+
+class StopBeat(Exception):
+    pass

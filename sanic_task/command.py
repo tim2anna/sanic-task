@@ -3,6 +3,7 @@
 
 from sanic_script import Manager
 from .worker import Worker
+from .beat import Beat
 
 
 manager = Manager(usage="sanic-task")
@@ -15,5 +16,6 @@ def worker():
 
 @manager.command
 def beat():
-    raise NotImplemented
+    beat = Beat()
+    beat.run()
 
